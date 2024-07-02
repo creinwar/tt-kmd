@@ -690,6 +690,82 @@ static long ioctl_lock_ctl(struct chardev_private *priv,
 	return 0;
 }
 
+static long ioctl_sg2042_flush(struct chardev_private *priv,
+                               struct tenstorrent_sg2042_flush __user *arg)
+{
+  struct tenstorrent_sg2042_flush in;
+  int ret = 0;
+
+  memset(&in, 0, sizeof(in));
+
+  printk(KERN_NOTICE "[ioctl_sg2042_flush] Entered function\n");
+
+  if(copy_from_user(&in, arg, sizeof(in)) != 0){
+    return -EFAULT;
+  } else {
+    printk(KERN_NOTICE "[ioctl_sg2042_flush] Successfully copied from user!\n");
+  }
+
+  // Only do this if we have a T-Head chip that does not have the PCIe subordinate
+  // side hooked up to the cache coherence (older Sophon SG2042)
+  if(IS_ENABLED(CONFIG_ERRATA_THEAD) && IS_ENABLED(CONFIG_RISCV)){
+    u64 max_num_pages = (in.size + PAGE_SIZE - 1)/PAGE_SIZE;
+    u64 page_size = PAGE_SIZE;
+
+    // TODO: Verify
+    u64 increment = 64;
+
+    struct page **pages = NULL;
+
+    printk(KERN_NOTICE "[ioctl_sg2042_flush] Flushing functionality is enabled\n");
+    printk(KERN_NOTICE "[ioctl_sg2042_flush] max_num_pages = 0x%llx, page_size = 0x%llx\n", max_num_pages, page_size);    
+    
+    pages = kmalloc(max_num_pages * sizeof(struct page *), GFP_KERNEL);
+
+    if(!pages)
+      return -ENOMEM;
+
+    // Walk the user level pagetable to figure out the physical addresses to flush
+    ret = get_user_pages_fast(in.virtual_address, max_num_pages,
+                              FOLL_GET, pages);
+
+    if(ret > 0){
+      printk(KERN_NOTICE "[ioctl_sg2042_flush] Got 0x%x user-level page mappings for virt = 0x%llx\n", ret, in.virtual_address);
+      printk(KERN_NOTICE "[ioctl_sg2042_flush] 1st phys addr = 0x%llx\n", page_to_phys(pages[0]));
+      for(u64 pg = 0; pg < ret; pg++){
+
+        /*if(PageHuge(pages[pg])){
+          page_size = huge_page_size(pages[pg]);
+        } else {
+          page_size = PAGE_SIZE;
+        }*/
+
+        // Call T-Heads own "clean, then invalidate - physical address" instruction
+        // for each physical address we want to flush
+        // (Taken from Linux: arch/riscv/errata/thead/errata.c)
+        __asm volatile(
+          "add a0, %0, x0\n    \
+           add t0, a0, %1\n    \
+           j 2f\n              \
+           1:\n                \
+           .word 0x2b5000b\n   \
+           add a0, a0, %2\n    \
+           2:\n                \
+           bltu a0, t0, 1b\n   \
+          "
+          :: "r"(page_to_phys(pages[pg])),
+             "r"(page_size),
+             "r"(increment)
+          : "a0", "t0"
+          );
+      }
+      ret = 0;
+    }
+    kfree(pages);
+  }
+  return ret;
+}
+
 static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
 	long ret = -EINVAL;
@@ -730,6 +806,10 @@ static long tt_cdev_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 		case TENSTORRENT_IOCTL_LOCK_CTL:
 			ret = ioctl_lock_ctl(priv, (struct tenstorrent_lock_ctl __user *)arg);
 			break;
+
+    case TENSTORRENT_IOCTL_SG2042_FLUSH:
+      ret = ioctl_sg2042_flush(priv, (struct tenstorrent_sg2042_flush __user *)arg);
+      break;
 
 		default:
 			ret = -EINVAL;

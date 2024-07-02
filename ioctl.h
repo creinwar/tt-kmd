@@ -20,6 +20,7 @@
 #define TENSTORRENT_IOCTL_RESET_DEVICE		_IO(TENSTORRENT_IOCTL_MAGIC, 6)
 #define TENSTORRENT_IOCTL_PIN_PAGES		_IO(TENSTORRENT_IOCTL_MAGIC, 7)
 #define TENSTORRENT_IOCTL_LOCK_CTL		_IO(TENSTORRENT_IOCTL_MAGIC, 8)
+#define TENSTORRENT_IOCTL_SG2042_FLUSH _IO(TENSTORRENT_IOCTL_MAGIC, 9)
 
 // For tenstorrent_mapping.mapping_id. These are not array indices.
 #define TENSTORRENT_MAPPING_UNUSED		0
@@ -176,6 +177,11 @@ struct tenstorrent_lock_ctl_out {
 struct tenstorrent_lock_ctl {
 	struct tenstorrent_lock_ctl_in in;
 	struct tenstorrent_lock_ctl_out out;
+};
+
+struct tenstorrent_sg2042_flush {
+  __u64 virtual_address;
+  __u64 size;
 };
 
 #endif
