@@ -698,12 +698,8 @@ static long ioctl_sg2042_flush(struct chardev_private *priv,
 
   memset(&in, 0, sizeof(in));
 
-  printk(KERN_NOTICE "[ioctl_sg2042_flush] Entered function\n");
-
   if(copy_from_user(&in, arg, sizeof(in)) != 0){
     return -EFAULT;
-  } else {
-    printk(KERN_NOTICE "[ioctl_sg2042_flush] Successfully copied from user!\n");
   }
 
   // Only do this if we have a T-Head chip that does not have the PCIe subordinate
@@ -713,53 +709,50 @@ static long ioctl_sg2042_flush(struct chardev_private *priv,
     u64 page_size = PAGE_SIZE;
 
     // TODO: Verify
-    u64 increment = 64;
+    u64 const increment = 64;
 
     struct page **pages = NULL;
 
-    printk(KERN_NOTICE "[ioctl_sg2042_flush] Flushing functionality is enabled\n");
-    printk(KERN_NOTICE "[ioctl_sg2042_flush] max_num_pages = 0x%llx, page_size = 0x%llx\n", max_num_pages, page_size);    
-    
     pages = kmalloc(max_num_pages * sizeof(struct page *), GFP_KERNEL);
 
     if(!pages)
       return -ENOMEM;
 
     // Walk the user level pagetable to figure out the physical addresses to flush
-    ret = get_user_pages_fast(in.virtual_address, max_num_pages,
+    ret = get_user_pages_fast((in.virtual_address & ~(PAGE_SIZE - 1)), max_num_pages,
                               FOLL_GET, pages);
 
     if(ret > 0){
-      printk(KERN_NOTICE "[ioctl_sg2042_flush] Got 0x%x user-level page mappings for virt = 0x%llx\n", ret, in.virtual_address);
-      printk(KERN_NOTICE "[ioctl_sg2042_flush] 1st phys addr = 0x%llx\n", page_to_phys(pages[0]));
-      for(u64 pg = 0; pg < ret; pg++){
+      printk(KERN_NOTICE "[tenstorrent ioctl_sg2042_flush] Flushing %d pages for virt = 0x%llx, phys = 0x%llx\n",
+	     ret, (in.virtual_address & ~(PAGE_SIZE - 1)), page_to_phys(pages[0]));
 
-        /*if(PageHuge(pages[pg])){
-          page_size = huge_page_size(pages[pg]);
-        } else {
-          page_size = PAGE_SIZE;
-        }*/
+      __asm volatile("fence iorw, iorw\n" :::);
+
+      for(u64 pg = 0; pg < ret; pg++){
+	printk(KERN_NOTICE "[tenstorrent ioctl_sg2042_flush] flush paddr = 0x%llx\n", page_to_phys(pages[pg]));
 
         // Call T-Heads own "clean, then invalidate - physical address" instruction
         // for each physical address we want to flush
+	// Finally call T-Heads "sync.s" instruction to ensure all cache operations have finished
         // (Taken from Linux: arch/riscv/errata/thead/errata.c)
         __asm volatile(
-          "add a0, %0, x0\n    \
-           add t0, a0, %1\n    \
+          "add a0, %1, x0\n    \
            j 2f\n              \
-           1:\n                \
-           .word 0x2b5000b\n   \
-           add a0, a0, %2\n    \
+           3:\n                \
+           .long 0x02b5000b\n  /* dcache.cipa a0 */ \
+           add a0, a0, %0\n    \
            2:\n                \
-           bltu a0, t0, 1b\n   \
+           bltu a0, %2, 3b\n   \
+           .long 0x0190000b\n  /* sync.s */ \
           "
-          :: "r"(page_to_phys(pages[pg])),
-             "r"(page_size),
-             "r"(increment)
-          : "a0", "t0"
+          :: "r"(increment),
+             "r"(page_to_phys(pages[pg])),
+             "r"(page_to_phys(pages[pg]) + page_size + 128)
+          : "a0"
           );
       }
       ret = 0;
+      __asm volatile("fence iorw, iorw\n" :::);
     }
     kfree(pages);
   }
